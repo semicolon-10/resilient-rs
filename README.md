@@ -53,7 +53,7 @@ Add the following line to your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-resilient-rs = "0.4.6" # Replace with the latest version
+resilient-rs = "0.4.7" # Replace with the latest version
 ```
 OR
 ```bash

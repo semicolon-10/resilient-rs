@@ -6,9 +6,8 @@ use async_std::net::TcpStream;
 use async_std::task::sleep;
 use rand::{Rng, rng};
 
-use resilient_rs::asynchronous::{
-    CircuitBreaker, execute_with_fallback, retry, retry_with_exponential_backoff,
-};
+use resilient_rs::asynchronous::{CircuitBreaker, execute_with_fallback, retry};
+use resilient_rs::config::RetryStrategy::ExponentialBackoff;
 use resilient_rs::config::{CircuitBreakerConfig, ExecConfig, RetryConfig};
 
 async fn send() -> Result<String, Error> {
@@ -43,9 +42,10 @@ pub async fn example_async_exponential_with_condition() {
         max_attempts: 4,
         delay: Duration::from_millis(100),
         retry_condition: Some(should_retry),
+        strategy: ExponentialBackoff,
     };
 
-    let result = retry_with_exponential_backoff(|| async { send().await }, &retry_config).await;
+    let result = retry(|| async { send().await }, &retry_config).await;
 
     match result {
         Ok(value) => println!("Success: {}", value),

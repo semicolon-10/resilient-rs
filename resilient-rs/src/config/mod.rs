@@ -1,10 +1,7 @@
+use crate::strategies::RetryStrategy;
 use std::error::Error;
 use std::time::Duration;
 
-/// Configuration for retrying operations.
-///
-/// This struct defines the parameters for retrying an operation, including
-/// the maximum number of attempts and the delay between retries.
 #[derive(Debug)]
 pub struct RetryConfig<E> {
     /// The maximum number of retry attempts.
@@ -16,10 +13,18 @@ pub struct RetryConfig<E> {
 
     /// The delay between retry attempts.
     ///
-    /// This specifies the amount of time to wait between each retry attempt.
-    /// For example, if `delay` is set to `Duration::from_secs(2)`, the program
-    /// will wait 2 seconds between retries.
+    /// This specifies the base amount of time to wait between each retry attempt.
+    /// The actual delay may vary depending on the `strategy`. For example, if
+    /// `delay` is set to `Duration::from_secs(2)` and the strategy is `Linear`,
+    /// the program will wait 2 seconds between retries.
     pub delay: Duration,
+
+    /// The strategy used to calculate delays between retry attempts.
+    ///
+    /// This field determines how the `delay` is applied:
+    /// - `Linear`: Uses a fixed delay between retries.
+    /// - `ExponentialBackoff`: Increases the delay exponentially with each retry.
+    pub strategy: RetryStrategy,
 
     /// An optional function to determine if a retry should be attempted.
     ///
@@ -30,17 +35,6 @@ pub struct RetryConfig<E> {
     ///
     /// If set to `None` (the default), all errors will trigger a retry up to `max_attempts`.
     /// If set to `Some(fn)`, only errors for which the function returns `true` will be retried.
-    ///
-    /// # Examples
-    /// ```
-    /// use std::time::Duration;
-    /// use resilient_rs::config::RetryConfig;
-    /// let config = RetryConfig {
-    ///     max_attempts: 3,
-    ///     delay: Duration::from_secs(1),
-    ///     retry_condition: Some(|e: &String| e.contains("transient")),
-    /// };
-    /// ```
     /// In this example, only errors containing the word "transient" will trigger retries.
     pub retry_condition: Option<fn(&E) -> bool>,
 }
@@ -51,7 +45,8 @@ impl<E> Default for RetryConfig<E> {
     /// The default configuration includes:
     /// - `max_attempts`: 3 retries
     /// - `delay`: 2 seconds between retries
-    /// - `should_retry`: `None`, meaning all errors trigger retries
+    /// - `strategy`: `Linear`
+    /// - `retry_condition`: `None`, meaning all errors trigger retries
     ///
     /// This implementation allows you to create a `RetryConfig` with sensible
     /// defaults using `RetryConfig::default()`.
@@ -59,20 +54,23 @@ impl<E> Default for RetryConfig<E> {
         RetryConfig {
             max_attempts: 3,
             delay: Duration::from_secs(2),
+            strategy: RetryStrategy::Linear,
             retry_condition: None,
         }
     }
 }
+
 impl<E> RetryConfig<E> {
-    /// Creates a new `RetryConfig` with the specified maximum attempts and delay.
+    /// Creates a new `RetryConfig` with the specified maximum attempts, delay, and strategy.
     ///
-    /// This constructor initializes a `RetryConfig` with the given `max_attempts` and `delay`,
-    /// setting `should_retry` to `None`. When `should_retry` is `None`, all errors will trigger
-    /// retries up to the specified `max_attempts`.
+    /// This constructor initializes a `RetryConfig` with the given `max_attempts`, `delay`,
+    /// and `strategy`, setting `retry_condition` to `None`. When `retry_condition` is `None`,
+    /// all errors will trigger retries up to the specified `max_attempts`.
     ///
     /// # Arguments
     /// * `max_attempts` - The maximum number of attempts (including the initial attempt).
-    /// * `delay` - The duration to wait between retry attempts.
+    /// * `delay` - The base duration to wait between retry attempts.
+    /// * `strategy` - The retry strategy to use (`Linear` or `ExponentialBackoff`).
     ///
     /// # Returns
     /// A new `RetryConfig` instance with the provided settings and no retry condition.
@@ -80,13 +78,14 @@ impl<E> RetryConfig<E> {
     /// # Examples
     /// ```
     /// use std::time::Duration;
-    /// use resilient_rs::config::RetryConfig;
-    /// let config = RetryConfig::<String>::new(3, Duration::from_secs(1));
+    /// use resilient_rs::config::{RetryConfig, RetryStrategy};
+    /// let config = RetryConfig::new(3, Duration::from_secs(1), RetryStrategy::Linear);
     /// ```
-    pub fn new(max_attempts: usize, delay: Duration) -> Self {
+    pub fn new(max_attempts: usize, delay: Duration, strategy: RetryStrategy) -> Self {
         RetryConfig {
             max_attempts,
             delay,
+            strategy,
             retry_condition: None,
         }
     }
@@ -95,11 +94,11 @@ impl<E> RetryConfig<E> {
     ///
     /// This method allows you to specify a function that determines whether an operation should
     /// be retried based on the error. It takes ownership of the `RetryConfig`, sets the
-    /// `should_retry` field to the provided function, and returns the updated instance.
+    /// `retry_condition` field to the provided function, and returns the updated instance.
     /// This enables method chaining in a builder-like pattern.
     ///
     /// # Arguments
-    /// * `should_retry` - A function that takes a reference to an error (`&E`) and returns
+    /// * `retry_condition` - A function that takes a reference to an error (`&E`) and returns
     ///   `true` if the operation should be retried, or `false` if it should fail immediately.
     ///
     /// # Returns
@@ -108,12 +107,36 @@ impl<E> RetryConfig<E> {
     /// # Examples
     /// ```
     /// use std::time::Duration;
-    /// use resilient_rs::config::RetryConfig;
-    /// let config = RetryConfig::new(3, Duration::from_secs(1))
+    /// use resilient_rs::config::{RetryConfig, RetryStrategy};
+    /// let config = RetryConfig::new(3, Duration::from_secs(1), RetryStrategy::Linear)
     ///     .with_retry_condition(|e: &String| e.contains("transient"));
     /// ```
     pub fn with_retry_condition(mut self, retry_condition: fn(&E) -> bool) -> Self {
         self.retry_condition = Some(retry_condition);
+        self
+    }
+
+    /// Sets a custom retry strategy and returns the modified `RetryConfig`.
+    ///
+    /// This method allows you to specify the retry strategy (`Linear` or `ExponentialBackoff`).
+    /// It takes ownership of the `RetryConfig`, sets the `strategy` field to the provided value,
+    /// and returns the updated instance. This enables method chaining in a builder-like pattern.
+    ///
+    /// # Arguments
+    /// * `strategy` - The retry strategy to use (`Linear` or `ExponentialBackoff`).
+    ///
+    /// # Returns
+    /// The updated `RetryConfig` with the specified retry strategy.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::time::Duration;
+    /// use resilient_rs::config::{RetryConfig, RetryStrategy};
+    /// let config = RetryConfig::default()
+    ///     .with_strategy(RetryStrategy::ExponentialBackoff);
+    /// ```
+    pub fn with_strategy(mut self, strategy: RetryStrategy) -> Self {
+        self.strategy = strategy;
         self
     }
 }

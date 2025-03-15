@@ -16,9 +16,10 @@ use std::thread::sleep;
 /// ```
 /// use std::time::Duration;
 /// use resilient_rs::config::RetryConfig;
+/// use resilient_rs::config::RetryStrategy::Linear;
 /// use resilient_rs::synchronous::retry;
 ///
-/// let retry_config = RetryConfig { max_attempts: 3, delay: Duration::from_millis(500), retry_condition: None };
+/// let retry_config = RetryConfig { max_attempts: 3, delay: Duration::from_millis(500), retry_condition: None, strategy: Linear };
 /// let result: Result<i32, &str> = retry(|| {
 ///     Err("Temporary failure") // Always fails in this example
 /// }, &retry_config);
@@ -31,6 +32,7 @@ where
     F: FnMut() -> Result<T, E>,
 {
     let mut attempts = 0;
+    let mut delay = retry_config.delay;
 
     loop {
         match operation() {
@@ -45,9 +47,10 @@ where
                         "Operation failed (attempt {}/{}), retrying after {:?}...",
                         attempts + 1,
                         retry_config.max_attempts,
-                        retry_config.delay
+                        delay
                     );
-                    sleep(retry_config.delay);
+                    sleep(delay);
+                    delay = retry_config.strategy.calculate_delay(delay, attempts + 1);
                 } else {
                     warn!(
                         "Operation failed (attempt {}/{}), not retryable, giving up.",
@@ -70,49 +73,10 @@ where
     }
 }
 
-/// Retries a given operation using an exponential backoff strategy.
-///
-/// # Arguments
-///
-/// * `operation` - A closure that performs the operation, returning `Result<T, E>`.
-/// * `retry_config` - Configuration specifying the initial delay and maximum attempts.
-///
-/// # Returns
-///
-/// * `Ok(T)` if the operation succeeds within the allowed attempts.
-/// * `Err(E)` if all attempts fail.
-///
-/// # Example
-///
-/// ```
-/// use resilient_rs::config::RetryConfig;
-/// use resilient_rs::synchronous::retry_with_exponential_backoff;
-///
-/// fn main() {
-/// let retry_config = RetryConfig::default();
-///     let mut attempts = 0;
-///
-///     let result = retry_with_exponential_backoff(
-///         || {
-///             attempts += 1;
-///             if attempts < 3 {
-///                 Err("Temporary failure")
-///             } else {
-///                 Ok("Success")
-///             }
-///         },
-///         &retry_config,
-///     );
-///
-///     println!("{:?}", result);
-/// }
-/// ```
-///
-/// This example simulates an operation that fails three times before succeeding.
-/// The function retries using an exponential backoff strategy.
-/// # Notes
-/// - The delay is multiplied by 2 after each failed attempt.
-/// - The function logs warnings for failed attempts and final failure.
+#[deprecated(
+    since = "0.4.7",
+    note = "use `retry` with `ExponentialBackoff` this will be removed in upcoming versions"
+)]
 pub fn retry_with_exponential_backoff<F, T, E>(
     mut operation: F,
     retry_config: &RetryConfig<E>,
@@ -166,6 +130,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategies::RetryStrategy::{ExponentialBackoff, Linear};
     use std::cell::RefCell;
     use std::fmt::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -177,6 +142,7 @@ mod tests {
             max_attempts: 3,
             delay: Duration::from_millis(10),
             retry_condition: None,
+            strategy: Linear,
         };
 
         let mut attempts = 0;
@@ -202,6 +168,7 @@ mod tests {
             max_attempts: 3,
             delay: Duration::from_millis(10),
             retry_condition: None,
+            strategy: Linear,
         };
 
         let attempts = AtomicUsize::new(0);
@@ -238,6 +205,7 @@ mod tests {
             max_attempts: 5,
             delay: Duration::from_millis(10),
             retry_condition: None,
+            strategy: Linear,
         };
 
         let result = retry(succeed_on_third_attempt, &retry_config);
@@ -253,9 +221,10 @@ mod tests {
             max_attempts: 3,
             delay: Duration::from_millis(100),
             retry_condition: None,
+            strategy: ExponentialBackoff,
         };
 
-        let result: Result<i32, Error> = retry_with_exponential_backoff(|| Ok(60), &retry_config);
+        let result: Result<i32, Error> = retry(|| Ok(60), &retry_config);
         assert_eq!(result, Ok(60));
     }
 
@@ -265,11 +234,12 @@ mod tests {
             max_attempts: 5,
             delay: Duration::from_millis(100),
             retry_condition: None,
+            strategy: ExponentialBackoff,
         };
 
         static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
-        let result = retry_with_exponential_backoff(
+        let result = retry(
             || {
                 if ATTEMPTS.fetch_add(1, Ordering::SeqCst) < 2 {
                     Err("Temporary failure")
@@ -290,11 +260,12 @@ mod tests {
             max_attempts: 3,
             delay: Duration::from_millis(100),
             retry_condition: None,
+            strategy: ExponentialBackoff,
         };
 
         static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
-        let result: Result<(), &str> = retry_with_exponential_backoff(
+        let result: Result<(), &str> = retry(
             || {
                 ATTEMPTS.fetch_add(1, Ordering::SeqCst);
                 Err("Permanent failure")
@@ -309,7 +280,7 @@ mod tests {
     #[test]
     fn test_retry_with_should_retry_success() {
         let attempts = RefCell::new(0);
-        let config = RetryConfig::new(3, Duration::from_millis(1))
+        let config = RetryConfig::new(3, Duration::from_millis(1), ExponentialBackoff)
             .with_retry_condition(|e: &String| e.contains("transient"));
 
         let result = retry(
@@ -332,7 +303,7 @@ mod tests {
     #[test]
     fn test_retry_with_should_not_retry_if_error() {
         let attempts = RefCell::new(0);
-        let config = RetryConfig::new(3, Duration::from_millis(1))
+        let config = RetryConfig::new(3, Duration::from_millis(1), ExponentialBackoff)
             .with_retry_condition(|e: &String| e.contains("500"));
 
         let result = retry(
@@ -355,7 +326,7 @@ mod tests {
     #[test]
     fn test_retry_with_backoff_should_not_retry_after_1_attempt() {
         let attempts = RefCell::new(0);
-        let config = RetryConfig::new(5, Duration::from_millis(1))
+        let config = RetryConfig::new(5, Duration::from_millis(1), ExponentialBackoff)
             .with_retry_condition(|e: &String| e.contains("transient"));
 
         let result = retry_with_exponential_backoff(

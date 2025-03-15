@@ -1,6 +1,8 @@
-use resilient_rs::config::RetryConfig;
-use resilient_rs::synchronous::{retry, retry_with_exponential_backoff};
 use std::time::Duration;
+
+use resilient_rs::config::RetryConfig;
+use resilient_rs::config::RetryStrategy::{ExponentialBackoff, Linear};
+use resilient_rs::synchronous::retry;
 
 // Example 1: Using retry() with a simple failing operation
 pub fn example_simple_retry() {
@@ -37,11 +39,12 @@ pub fn example_exponential_backoff() {
         max_attempts: 4,
         delay: Duration::from_millis(100),
         retry_condition: None,
+        strategy: ExponentialBackoff,
     };
 
     let mut counter = 0;
 
-    let result = retry_with_exponential_backoff(
+    let result = retry(
         || {
             counter += 1;
             println!("Attempt #{} with increasing delay", counter);
@@ -68,6 +71,7 @@ pub fn example_retry_with_condition() {
         max_attempts: 4,
         delay: Duration::from_millis(300),
         retry_condition: Some(should_retry),
+        strategy: Linear,
     };
 
     let mut attempt_count = 0;
